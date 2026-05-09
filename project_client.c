@@ -45,6 +45,32 @@ int recv_all(int s, char *buf, int len) {
     return 0;
 }
 
+void send_file(const char *filepath) {
+    FILE *f = fopen(filepath, "rb");
+    if (!f) {
+        append_chat("❌ Cannot open file.");
+        return;
+    }
+    char *base = basename((char*)filepath);
+    append_chat("[System] Uploading file...");
+
+    char buffer[MAX_BUF];
+    size_t bytes;
+    while ((bytes = fread(buffer, 1, MAX_BUF, f)) > 0) {
+        PacketHeader h = {TYPE_FILE, bytes};
+        strncpy(h.filename, base, 127);
+        send(sock, &h, sizeof(h), 0);
+        send(sock, buffer, bytes, 0);
+        usleep(1000);
+    }
+    fclose(f);
+
+    PacketHeader end = {TYPE_FILE_END, 0};
+    strncpy(end.filename, base, 127);
+    send(sock, &end, sizeof(end), 0);
+    append_chat("[System] File upload finished.");
+}
+
 void handle_incoming_data() {
     PacketHeader h;
     if (recv_all(sock, (char*)&h, sizeof(h)) < 0) {
@@ -54,7 +80,7 @@ void handle_incoming_data() {
         return;
     }
 
-    char payload[MAX_BUF + 1] = {0};
+    char payload[MAX_BUF+1] = {0};
     if (h.payload_size > 0) {
         recv_all(sock, payload, h.payload_size);
         payload[h.payload_size] = '\0';
@@ -73,12 +99,11 @@ void handle_incoming_data() {
         }
     }
     else if (h.type == TYPE_CHAT) {
-        char display_buf[MAX_BUF + 100];
+        char display_buf[MAX_BUF+100];
         snprintf(display_buf, sizeof(display_buf), "%s: %s", h.sender_name, payload);
         append_chat(display_buf);
     }
     else if (h.type == TYPE_FILE) {
-        // Save chunk to file
         char out_path[256];
         snprintf(out_path, sizeof(out_path), "received_%s", h.filename);
         int f = open(out_path, O_WRONLY | O_CREAT | O_APPEND, 0644);
@@ -88,42 +113,13 @@ void handle_incoming_data() {
         }
     }
     else if (h.type == TYPE_FILE_END) {
-        append_chat("[System] File download complete: ");
-        append_chat(h.filename);
+        char msg[256];
+        snprintf(msg, sizeof(msg), "[System] File download complete: %s", h.filename);
+        append_chat(msg);
     }
     else if (h.type == TYPE_FILE_INFO) {
-        // Display list of available files
         append_chat(payload);
     }
-}
-
-void send_file(const char *filepath) {
-    FILE *f = fopen(filepath, "rb");
-    if (!f) {
-        append_chat("❌ Cannot open file.");
-        return;
-    }
-
-    char *base = basename((char*)filepath);
-    append_chat("[System] Uploading file...");
-
-    char buffer[MAX_BUF];
-    size_t bytes;
-    while ((bytes = fread(buffer, 1, MAX_BUF, f)) > 0) {
-        PacketHeader h = {TYPE_FILE, bytes};
-        strncpy(h.filename, base, 127);
-        send(sock, &h, sizeof(h), 0);
-        send(sock, buffer, bytes, 0);
-        usleep(1000); // small delay
-    }
-    fclose(f);
-
-    // Send file end marker
-    PacketHeader end = {TYPE_FILE_END, 0};
-    strncpy(end.filename, base, 127);
-    send(sock, &end, sizeof(end), 0);
-
-    append_chat("[System] File upload finished.");
 }
 
 void on_send_clicked(GtkWidget *btn, gpointer data) {
@@ -156,7 +152,7 @@ void on_send_clicked(GtkWidget *btn, gpointer data) {
     send(sock, &h, sizeof(h), 0);
     send(sock, msg, h.payload_size, 0);
 
-    char display_buf[MAX_BUF + 60];
+    char display_buf[MAX_BUF+60];
     snprintf(display_buf, sizeof(display_buf), "[Me]: %s", msg);
     append_chat(display_buf);
     gtk_entry_set_text(GTK_ENTRY(entry_msg), "");
@@ -188,30 +184,47 @@ int main(int argc, char *argv[]) {
     gtk_widget_show_all(dialog);
     if (gtk_dialog_run(GTK_DIALOG(dialog)) == GTK_RESPONSE_OK) {
         strncpy(my_username, gtk_entry_get_text(GTK_ENTRY(entry)), 49);
-    } else return 0;
+    } else {
+        gtk_widget_destroy(dialog);
+        return 0;
+    }
     gtk_widget_destroy(dialog);
 
+    // Connect to server
     sock = socket(AF_INET, SOCK_STREAM, 0);
     struct sockaddr_in addr = {0};
     addr.sin_family = AF_INET;
     addr.sin_port = htons(PORT);
     inet_pton(AF_INET, "127.0.0.1", &addr.sin_addr);
-    if (connect(sock, (struct sockaddr*)&addr, sizeof(addr)) < 0) return 1;
+    if (connect(sock, (struct sockaddr*)&addr, sizeof(addr)) < 0) {
+        perror("Connection failed");
+        return 1;
+    }
     send(sock, my_username, strlen(my_username), 0);
 
-    // UI
+    // Build main window
     GtkWidget *win = gtk_window_new(GTK_WINDOW_TOPLEVEL);
     gtk_window_set_title(GTK_WINDOW(win), "Assiut Messenger");
     gtk_window_set_default_size(GTK_WINDOW(win), 750, 500);
     g_signal_connect(win, "destroy", G_CALLBACK(on_quit), NULL);
-    GtkWidget *hbox = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 5);
+
     GtkWidget *vbox = gtk_box_new(GTK_ORIENTATION_VERTICAL, 5);
+    GtkWidget *hbox = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 5);
 
     chat_buffer = gtk_text_buffer_new(NULL);
     GtkWidget *chat_view = gtk_text_view_new_with_buffer(chat_buffer);
+    gtk_text_view_set_editable(GTK_TEXT_VIEW(chat_view), FALSE);
     g_object_set_data(G_OBJECT(chat_buffer), "view", chat_view);
     GtkWidget *scroll = gtk_scrolled_window_new(NULL, NULL);
     gtk_container_add(GTK_CONTAINER(scroll), chat_view);
+
+    user_list_store = gtk_list_store_new(1, G_TYPE_STRING);
+    GtkWidget *user_tree = gtk_tree_view_new_with_model(GTK_TREE_MODEL(user_list_store));
+    gtk_tree_view_append_column(GTK_TREE_VIEW(user_tree),
+        gtk_tree_view_column_new_with_attributes("Active Users", gtk_cell_renderer_text_new(), "text", 0, NULL));
+    GtkWidget *list_scroll = gtk_scrolled_window_new(NULL, NULL);
+    gtk_container_add(GTK_CONTAINER(list_scroll), user_tree);
+    gtk_widget_set_size_request(list_scroll, 180, -1);
 
     entry_msg = gtk_entry_new();
     g_signal_connect(entry_msg, "activate", G_CALLBACK(on_send_clicked), NULL);
@@ -224,13 +237,6 @@ int main(int argc, char *argv[]) {
     gtk_box_pack_start(GTK_BOX(btn_box), file_btn, FALSE, FALSE, 0);
     gtk_box_pack_start(GTK_BOX(btn_box), send_btn, FALSE, FALSE, 0);
 
-    user_list_store = gtk_list_store_new(1, G_TYPE_STRING);
-    GtkWidget *tree = gtk_tree_view_new_with_model(GTK_TREE_MODEL(user_list_store));
-    gtk_tree_view_append_column(GTK_TREE_VIEW(tree), gtk_tree_view_column_new_with_attributes("Active Users", gtk_cell_renderer_text_new(), "text", 0, NULL));
-    GtkWidget *list_scroll = gtk_scrolled_window_new(NULL, NULL);
-    gtk_container_add(GTK_CONTAINER(list_scroll), tree);
-    gtk_widget_set_size_request(list_scroll, 180, -1);
-
     gtk_box_pack_start(GTK_BOX(vbox), scroll, TRUE, TRUE, 0);
     gtk_box_pack_start(GTK_BOX(vbox), btn_box, FALSE, FALSE, 5);
     gtk_box_pack_start(GTK_BOX(hbox), vbox, TRUE, TRUE, 5);
@@ -238,20 +244,22 @@ int main(int argc, char *argv[]) {
     gtk_container_add(GTK_CONTAINER(win), hbox);
     gtk_widget_show_all(win);
 
+    // Main loop with select()
     fd_set readfds;
     struct timeval tv;
-    while (running) {
+    while (running && sock != -1) {
         while (gtk_events_pending()) gtk_main_iteration();
-        if (sock != -1) {
-            FD_ZERO(&readfds);
-            FD_SET(sock, &readfds);
-            tv.tv_sec = 0;
-            tv.tv_usec = 10000;
-            if (select(sock+1, &readfds, NULL, NULL, &tv) > 0) {
-                if (FD_ISSET(sock, &readfds)) handle_incoming_data();
+        FD_ZERO(&readfds);
+        FD_SET(sock, &readfds);
+        tv.tv_sec = 0;
+        tv.tv_usec = 10000;
+        if (select(sock+1, &readfds, NULL, NULL, &tv) > 0) {
+            if (FD_ISSET(sock, &readfds)) {
+                handle_incoming_data();
             }
-        } else usleep(10000);
+        }
     }
+
     if (sock != -1) close(sock);
     return 0;
 }
