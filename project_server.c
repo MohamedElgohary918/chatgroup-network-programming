@@ -11,7 +11,9 @@
 #include <sys/stat.h>
 #include <fcntl.h>
 #include "protocol.h"
-#include "chat_database.h"
+#include "chat_db.h"
+#include <stddef.h>
+
 
 #define PORT 8080
 #define MAX_CLIENTS 100
@@ -121,7 +123,7 @@ void send_file_list(int client_socket) {
 
     char list_str[4096] = "Available files:\n";
     for (int i = 0; i < count; i++) {
-        char line[256];
+        char line[512];
         snprintf(line, sizeof(line), "  %s  (%ld bytes) - uploaded by %s\n",
                  files[i].filename, files[i].size, files[i].sender);
         strncat(list_str, line, sizeof(list_str) - strlen(list_str) - 1);
@@ -233,7 +235,9 @@ void handle_client_message(int idx) {
             stat(final_path, &st);
             // Save metadata
             save_file_metadata(db, h.filename, client->username, st.st_size, "general");
-            log_message("File saved: " + (char*)h.filename);
+            char saved_msg[256];
+            snprintf(saved_msg, sizeof(saved_msg), "File saved: %s", h.filename);
+            log_message(saved_msg);
             // Notify everyone that a new file is available (optional)
             char notice[MAX_BUF];
             snprintf(notice, sizeof(notice), "📁 New file uploaded: %s", h.filename);
@@ -420,7 +424,9 @@ int main(int argc, char *argv[]) {
                                 memset(clients[i], 0, sizeof(chat_client));
                                 clients[i]->socket = c_sock;
                                 strncpy(clients[i]->username, username, 49);
-                                log_message("🚀 " + (char*)username + " joined");
+                                char join_msg[100];
+                                snprintf(join_msg, sizeof(join_msg), "🚀 %s joined", username);
+                                log_message(join_msg);
                                 send_chat_history(c_sock);
                                 send_file_list(c_sock);  // send available files list
                                 broadcast_user_list();
